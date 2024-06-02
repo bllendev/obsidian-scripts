@@ -4,11 +4,12 @@ verify_ssl = true
 name = "pypi"
 
 [packages]
-ocrmypdf = "*"
 pymupdf = "*"
 openai = "*"
 pdf2image = "*"
-python-poppler = "*"
+pillow = "*"
+requests = "*"
+pyyaml = "*"
 
 [dev-packages]
 
