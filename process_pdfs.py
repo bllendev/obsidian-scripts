@@ -30,16 +30,19 @@ JSON_LOG_PATH = '/app/logs/pdf_processing_log.json'
 
 
 ### GPT instructions
-api_instructions = f"""
+api_instructions = """
 Work as the worlds best OCR tool. Diagram or extract the information as notes in clear markdown formatting.
 If a diagram is present, recreate it in sensible markdown formatting (including the use of tables).
-If in a language other than english, add a translation at the bottom of the note.
+If in a language other than english, add a translation at the bottom of the note. Account for common Obsidian use cases (like links using [[]], tags, etc).
+Here are the yaml properties front matter extracted from the filename, add them as well with a simple ---\n{yaml_properties}\n---\n
+at the beginning of the response.
 """
 
 # call with api_second_instructions.format(context=context)
 api_second_instructions = """
-If there is instructions in the image of notes as to what you should do to format (you would be
-referenced as GPT) than follow said instructions, using the follow context as well..{context}.
+If there is instructions in the following context of notes as to what you should do to format (you would be
+referenced as GPT) than follow said instructions. This is to be used with Obsidian MD formatting,
+using the following context as well when presenting your final output...{context}
 """
 
 # Define the dictionary for YAML mappings
@@ -62,6 +65,9 @@ def encode_image(image):
     return f"data:image/png;base64,{img_str}"
 
 def ocr_and_extract_text(pdf_path):
+    filename = os.path.splitext(os.path.basename(pdf_path))[0]
+    yaml_properties = get_yaml_properties(filename)
+
     # Convert PDF pages to images
     images = convert_from_path(pdf_path)
     text = ""
@@ -81,7 +87,7 @@ def ocr_and_extract_text(pdf_path):
                     "content": [
                         {
                             "type": "text",
-                            "text": api_instructions,
+                            "text": api_instructions.format(yaml_properties=yaml_properties),
                         },
                         {
                             "type": "image_url",
@@ -124,7 +130,7 @@ def ocr_and_extract_text(pdf_path):
             }
             response = requests.post("https://api.openai.com/v1/chat/completions", headers=headers, json=payload)
             response_json = response.json()
-            text += response_json['choices'][0]['message']['content']
+            text = response_json['choices'][0]['message']['content']
 
     logging.info(f"Extracted text: {text}")
     return text
@@ -150,32 +156,17 @@ def create_markdown_note_in_obsidian(pdf_path, text, markdown_path, static_pdf_p
     # Delete the existing PDF file if it exists and then move the new one
     os.makedirs(os.path.dirname(static_pdf_path), exist_ok=True)
     try:
-        # if os.path.exists(static_pdf_path):
-        #     logging.info(f"Deleting existing PDF at {static_pdf_path}")
-        #     os.remove(static_pdf_path)
         logging.info(f"Moving PDF {pdf_path} to {static_pdf_path}")
         shutil.copy2(pdf_path, static_pdf_path)
         logging.info(f"PDF moved successfully from {pdf_path} to {static_pdf_path}")
     except Exception as e:
         logging.error(f"Failed to move PDF {pdf_path} to {static_pdf_path}: {e}")
 
-    filename = os.path.splitext(os.path.basename(pdf_path))[0]
-    yaml_properties = get_yaml_properties(filename)
-    
+    filename = os.path.splitext(os.path.basename(pdf_path))[0]    
     with open(markdown_path, 'w', encoding='utf-8') as md_file:
-        # Write YAML front matter
-        md_file.write('---\n')
-        for key, value in yaml_properties.items():
-            if isinstance(value, list):
-                md_file.write(f"{key}: [{', '.join(value)}]\n")
-            else:
-                md_file.write(f"{key}: {value}\n")
-        md_file.write('---\n\n')
-        
-        md_file.write(f"# {filename}\n\n")
-        md_file.write("# Extracted\n\n")
         md_file.write(text)
-        md_file.write(f"**Original PDF:** ![[{filename}.pdf]]\n\n")
+        md_file.write("\n\n")
+        md_file.write(f"### **Original PDF:** \n![[{filename}.pdf]]\n\n")
 
     logging.info(f"Markdown note created: {markdown_path}")
 
@@ -216,7 +207,7 @@ def process_pdfs_in_folder(folder, vault_base_path, vault_static_path, json_log_
                             markdown_path = existing_markdown_files[base_filename]
                             logging.info(f"Updating existing Markdown note: {markdown_path}")
                         else:
-                            markdown_path = os.path.join(vault_base_path, f"{base_filename}.md")
+                            markdown_path = os.path.join(vault_base_path, "knowledge", f"{base_filename}.md")
                             logging.info(f"Creating new Markdown note: {markdown_path}")
                         
                         static_pdf_path = os.path.join(vault_static_path, f"{base_filename}.pdf")
