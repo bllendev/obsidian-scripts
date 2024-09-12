@@ -1,0 +1,17 @@
+services:
+  pdf_processor:
+    build: .
+    volumes:
+      - "G:/My Drive/onyx/NoteAir3:/app/pdfs"  # from path
+      - $OBSIDIAN_VOLUME_PATH  # to path
+      - "./logs:/app/logs"
+    environment:
+      OPENAI_API_KEY: $OPENAI_API_KEY
+      OBSIDIAN_VAULT_PATH: $OBSIDIAN_VAULT_PATH
+      GITHUB_WIKI_PATH: $GITHUB_WIKI_PATH
+    command: python process_pdfs.py
+
+volumes:
+  pdf_processor-config:
+    external: true
+    name: pdf_processor-config

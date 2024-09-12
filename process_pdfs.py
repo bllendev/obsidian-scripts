@@ -11,7 +11,7 @@ import shutil
 import json
 from datetime import datetime, timedelta
 import logging
-
+import re
 
 # Set up logging to print to the console and to a file
 LOG_FILE_PATH = '/app/logs/process_pdfs.log'
@@ -22,8 +22,8 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(
 
 # Define your paths
 GOOGLE_DRIVE_PATH = '/app/pdfs'
-OBSIDIAN_BASE_PATH = '/app/obsidian'
-OBSIDIAN_STATIC_PATH = os.path.join(OBSIDIAN_BASE_PATH, 'knowledge', 'static')
+OBSIDIAN_BASE_PATH = '/app/obsidian'  # OBSIDIAN_VOLUME_PATH --> "user/path/to/where/files/are:/app/obsidian"  - keep the "/app/obsidian" part the same in dockerfile env def
+OBSIDIAN_STATIC_PATH = os.path.join(OBSIDIAN_BASE_PATH, 'knowledge', 'static')  # this will change by your path OBSIDIAN_BASE_PATH file structure 
 ROBOCOPY_LOG = '/app/logs/robocopy_log.txt'
 SYNC_SUMMARY_LOG = '/app/logs/sync_summary_log.txt'
 JSON_LOG_PATH = '/app/logs/pdf_processing_log.json'
@@ -33,7 +33,7 @@ JSON_LOG_PATH = '/app/logs/pdf_processing_log.json'
 api_instructions = """
 Work as the worlds best OCR tool. Diagram or extract the information as notes in clear markdown formatting.
 If a diagram is present, recreate it in sensible markdown formatting (including the use of tables).
-If in a language other than english, add a translation at the bottom of the note. Account for common Obsidian use cases (like links using [[]], tags, etc).
+If in a language other than english, add a translation at the bottom of the note (unless translations are already provided).
 Here are the yaml properties front matter extracted from the filename, add them as well with a simple ---\n{yaml_properties}\n---\n
 at the beginning of the response.
 """
@@ -42,7 +42,9 @@ at the beginning of the response.
 api_second_instructions = """
 If there is instructions in the following context of notes as to what you should do to format (you would be
 referenced as GPT) than follow said instructions. This is to be used with Obsidian MD formatting,
-using the following context as well when presenting your final output...{context}
+using the following context as well when presenting your final output...{context}. Return the result as if we were putting the
+markdown directly into obsidian, do not add your own comments or notes before the markdown to avoid messing up the formatting. Note
+that you don't need to wrap the markdown in a code block, just return the markdown as if it were a normal response.
 """
 
 # Define the dictionary for YAML mappings
@@ -64,12 +66,26 @@ def encode_image(image):
     img_str = base64.b64encode(buffered.getvalue()).decode('utf-8')
     return f"data:image/png;base64,{img_str}"
 
-def ocr_and_extract_text(pdf_path):
+def convert_from_path_and_save(pdf_path, filename, static_png_path):
+    images = convert_from_path(pdf_path)
+    img_file_paths = []
+    for i, image in enumerate(images):
+        img_path = f"{static_png_path}_{i}.png"
+        image.save(img_path, 'PNG')
+        img_file_paths.append(f"{img_path}")
+    return images, img_file_paths
+
+# def replace_brackets(text):
+
+#     # Replace words encased in "[]" with "[[]]"
+#     return re.sub(r'\[(.*?)\]', r'[[\1]]', text)
+
+def ocr_and_extract_text(pdf_path, static_png_path):
     filename = os.path.splitext(os.path.basename(pdf_path))[0]
     yaml_properties = get_yaml_properties(filename)
 
     # Convert PDF pages to images
-    images = convert_from_path(pdf_path)
+    images, img_file_paths = convert_from_path_and_save(pdf_path, filename, static_png_path)
     text = ""
     for image in images:
         base64_image = encode_image(image)
@@ -111,7 +127,7 @@ def ocr_and_extract_text(pdf_path):
             raise e
         
         # Check if there are any instructions to follow
-        if "GPT" in text:
+        if "gpt" in text.lower():
             context = text
             payload = {
                 "model": "gpt-4o",
@@ -132,8 +148,9 @@ def ocr_and_extract_text(pdf_path):
             response_json = response.json()
             text = response_json['choices'][0]['message']['content']
 
+    # text = replace_brackets(text)  # Replace single brackets with double brackets
     logging.info(f"Extracted text: {text}")
-    return text
+    return text, img_file_paths
 
 def get_yaml_properties(title):
     properties = {"tag": []}
@@ -151,22 +168,18 @@ def get_yaml_properties(title):
     properties['tag'] = list(set(properties['tag']))
     return properties
 
-def create_markdown_note_in_obsidian(pdf_path, text, markdown_path, static_pdf_path):
+def create_markdown_note_in_obsidian(pdf_path, text, markdown_path, img_file_paths):
     logging.info(f"Creating Markdown note for {pdf_path}")
-    # Delete the existing PDF file if it exists and then move the new one
-    os.makedirs(os.path.dirname(static_pdf_path), exist_ok=True)
-    try:
-        logging.info(f"Moving PDF {pdf_path} to {static_pdf_path}")
-        shutil.copy2(pdf_path, static_pdf_path)
-        logging.info(f"PDF moved successfully from {pdf_path} to {static_pdf_path}")
-    except Exception as e:
-        logging.error(f"Failed to move PDF {pdf_path} to {static_pdf_path}: {e}")
 
-    filename = os.path.splitext(os.path.basename(pdf_path))[0]    
+    filename = os.path.splitext(os.path.basename(pdf_path))[0]  
+    file_path_links = []
+    for i, img_path in enumerate(img_file_paths):
+        file_path_links.append(f"![[{filename}_{i}.png]]")  
+
     with open(markdown_path, 'w', encoding='utf-8') as md_file:
         md_file.write(text)
         md_file.write("\n\n")
-        md_file.write(f"### **Original PDF:** \n![[{filename}.pdf]]\n\n")
+        md_file.write(f"### **Original PDF (pngs):** \n {' '.join(file_path_links)} \n\n")
 
     logging.info(f"Markdown note created: {markdown_path}")
 
@@ -184,9 +197,9 @@ def process_pdfs_in_folder(folder, vault_base_path, vault_static_path, json_log_
     log_data = load_json_log(json_log_path)
     existing_markdown_files = {}
     for root, _, files in os.walk(vault_base_path):
-        logging.info(f"Processing folder: {root}")
-        logging.info(f"_: {_}")
-        logging.info(f"files: {files}")
+        # logging.info(f"Processing folder: {root}")
+        # logging.info(f"_: {_}")
+        # logging.info(f"files: {files}")
         for filename in files:
             if filename.endswith(".md"):
                 base_filename = os.path.splitext(filename)[0]
@@ -211,9 +224,10 @@ def process_pdfs_in_folder(folder, vault_base_path, vault_static_path, json_log_
                             logging.info(f"Creating new Markdown note: {markdown_path}")
                         
                         static_pdf_path = os.path.join(vault_static_path, f"{base_filename}.pdf")
+                        static_png_path = os.path.join(vault_static_path, f"{base_filename}")
 
-                        text = ocr_and_extract_text(pdf_path)
-                        create_markdown_note_in_obsidian(pdf_path, text, markdown_path, static_pdf_path)
+                        text, img_file_paths = ocr_and_extract_text(pdf_path, static_png_path)
+                        create_markdown_note_in_obsidian(pdf_path, text, markdown_path, img_file_paths)
                         
                         # Update the log data with the new modification time
                         log_data[base_filename] = file_mod_time
@@ -223,6 +237,7 @@ def process_pdfs_in_folder(folder, vault_base_path, vault_static_path, json_log_
     # Save the updated log data
     save_json_log(json_log_path, log_data)
 
+
 def main():
     # Perform OCR and create/update Markdown notes for PDFs in the Google Drive path
     process_pdfs_in_folder(GOOGLE_DRIVE_PATH, OBSIDIAN_BASE_PATH, OBSIDIAN_STATIC_PATH, JSON_LOG_PATH)
@@ -230,6 +245,7 @@ def main():
     # Log the sync summary
     with open(SYNC_SUMMARY_LOG, 'a') as summary_log:
         summary_log.write(f"Sync summary logged on {datetime.now()}\n")
+
 
 if __name__ == "__main__":
     main()
